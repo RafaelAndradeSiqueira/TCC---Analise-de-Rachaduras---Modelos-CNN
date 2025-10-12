@@ -1,6 +1,23 @@
 # ======================================
 # InceptionV4 Pré-Treinada (Com Melhorias Modernas e AMP)
 # ======================================
+# Objetivo:
+#   Aproveitar os pesos pré-treinados da InceptionV4 (ImageNet)
+#   aplicando técnicas modernas de eficiência e estabilidade de treinamento.
+#
+# Melhorias aplicadas:
+#   ✅ AMP (Automatic Mixed Precision) → menor uso de VRAM e maior velocidade.
+#   ✅ Acumulação de gradientes → simula batches maiores com menos memória.
+#   ✅ Pinagem de memória + non_blocking → transferência CPU↔GPU otimizada.
+#   ✅ Channels_last → uso mais eficiente da arquitetura RTX (Tensor Cores).
+#   ✅ AdamW + CosineAnnealingLR → otimização estável e convergência suave.
+#   ✅ Dropout + BatchNorm → já integrados na arquitetura InceptionV4.
+#
+# Sem:
+#   🚫 Congelamento de camadas
+#   🚫 Técnicas que prejudiquem generalização (augmentations agressivos)
+#
+# ======================================
 
 #!pip install timm tqdm torchmetrics -q
 
@@ -22,7 +39,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 IMG_SIZE = 299
 EPOCHS = 30
 LR = 1e-4
-SUBSET_SIZE = 40000
+SUBSET_SIZE = 40000  # opcional (usar subset do dataset)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 torch.backends.cudnn.benchmark = True
@@ -34,14 +51,14 @@ USE_AMP = (DEVICE.type == "cuda")
 CHANNELS_LAST = (DEVICE.type == "cuda")
 
 DATASET_DIR = "/content/DATASET"
-OUT_DIR = "/content/drive/MyDrive/VERSAO_FINAL/INCEPTION_PRE-TREINO_MELHORIAS"
+OUT_DIR = "/content/drive/MyDrive/VERSAO_FINAL/4_INCEPTIONV4_MODERNA"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-LOG_PATH = os.path.join(OUT_DIR, f"8_log_exec_{timestamp}.txt")
-GRAPH_PATH = os.path.join(OUT_DIR, f"8_grafico_treinamento_{timestamp}.png")
-MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"8_inceptionv4_final_{timestamp}.pt")
-BEST_PATH = os.path.join(OUT_DIR, f"8_inceptionv4_best_auc_{timestamp}.pt")
+LOG_PATH = os.path.join(OUT_DIR, f"4_log_exec_{timestamp}.txt")
+GRAPH_PATH = os.path.join(OUT_DIR, f"4_grafico_treinamento_{timestamp}.png")
+MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"4_inceptionv4_final_{timestamp}.pt")
+BEST_PATH = os.path.join(OUT_DIR, f"4_inceptionv4_best_auc_{timestamp}.pt")
 
 def log_write(text):
     print(text)
@@ -49,37 +66,37 @@ def log_write(text):
         f.write(text + "\n")
 
 # ----------------------
-# Verificação de GPU
+# GPU info
 # ----------------------
 if torch.cuda.is_available():
     gpu_name = torch.cuda.get_device_name(0)
-    log_write(f"✅ GPU detectada e ativa: {gpu_name}")
-    log_write(f"💾 Memória total da GPU: {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f} GB\n")
+    log_write(f"✅ GPU ativa: {gpu_name}")
+    log_write(f"💾 Memória total: {torch.cuda.get_device_properties(0).total_memory/1024**3:.2f} GB\n")
 else:
-    log_write("⚠️ Nenhuma GPU detectada — executando em CPU.\n")
+    log_write("⚠️ Executando em CPU (modo de fallback)\n")
 
-log_write("🚀 Iniciando treinamento InceptionV4 (PRÉ-TREINADA, COM MELHORIAS MODERNAS)\n")
+log_write("🚀 Iniciando treinamento InceptionV4 (PRÉ-TREINADA, com técnicas modernas)\n")
 
 # ----------------------
-# Transformações (aumentos moderados)
+# Transformações moderadas (mantendo compatibilidade com ImageNet)
 # ----------------------
 train_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomRotation(10),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ColorJitter(brightness=0.15, contrast=0.15),
     transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
 test_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
 # ----------------------
-# Dataset
+# Dataset e DataLoader
 # ----------------------
 base_dataset = datasets.ImageFolder(DATASET_DIR, transform=test_transform)
 classes = base_dataset.classes
@@ -90,10 +107,9 @@ if SUBSET_SIZE and SUBSET_SIZE < len(base_dataset):
 else:
     full_dataset = base_dataset
 
-total_size = len(full_dataset)
-train_size = int(0.7 * total_size)
-val_size   = int(0.15 * total_size)
-test_size  = total_size - train_size - val_size
+train_size = int(0.7 * len(full_dataset))
+val_size   = int(0.15 * len(full_dataset))
+test_size  = len(full_dataset) - train_size - val_size
 
 train_ds, val_ds, test_ds = random_split(
     full_dataset, [train_size, val_size, test_size],
@@ -104,20 +120,19 @@ train_ds.dataset.transform = train_transform
 val_ds.dataset.transform   = test_transform
 test_ds.dataset.transform  = test_transform
 
-# DataLoaders otimizados
 train_loader = DataLoader(train_ds, batch_size=MICRO_BATCH_SIZE, shuffle=True,
-                          num_workers=2, pin_memory=True)
+                          num_workers=2, pin_memory=True, persistent_workers=True)
 val_loader   = DataLoader(val_ds, batch_size=MICRO_BATCH_SIZE, shuffle=False,
-                          num_workers=2, pin_memory=True)
+                          num_workers=2, pin_memory=True, persistent_workers=True)
 test_loader  = DataLoader(test_ds, batch_size=MICRO_BATCH_SIZE, shuffle=False,
-                          num_workers=2, pin_memory=True)
+                          num_workers=2, pin_memory=True, persistent_workers=True)
 
 log_write(f"Classes: {classes}")
 log_write(f"Treino: {len(train_ds)} | Validação: {len(val_ds)} | Teste: {len(test_ds)}")
 log_write(f"Micro-batch: {MICRO_BATCH_SIZE} | Accum steps: {ACCUM_STEPS} | Batch efetivo: {MICRO_BATCH_SIZE*ACCUM_STEPS}\n")
 
 # ----------------------
-# Modelo InceptionV4 (pré-treinado no ImageNet)
+# Modelo InceptionV4 (pré-treinado)
 # ----------------------
 model = timm.create_model("inception_v4", pretrained=True)
 model.last_linear = nn.Linear(model.last_linear.in_features, 1)
@@ -126,9 +141,8 @@ model = model.to(DEVICE)
 if CHANNELS_LAST:
     model = model.to(memory_format=torch.channels_last)
 
-# ✅ Treinar TODAS as camadas (sem congelamento)
 for param in model.parameters():
-    param.requires_grad = True
+    param.requires_grad = True  # sem congelamento
 
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
@@ -140,7 +154,7 @@ metric_auc = BinaryAUROC().cpu()
 metric_f1  = BinaryF1Score().cpu()
 
 # ----------------------
-# Função de treino/validação (com AMP + acumulação)
+# Função de treino/validação com AMP + acumulação
 # ----------------------
 def run_epoch(model, loader, criterion, optimizer=None):
     is_train = optimizer is not None
@@ -177,7 +191,7 @@ def run_epoch(model, loader, criterion, optimizer=None):
 
         total_loss += loss.detach().item() * imgs.size(0)
 
-        del imgs, labels, outputs, loss, preds, lbls
+        del imgs, labels, outputs, loss
         gc.collect()
         if DEVICE.type == "cuda":
             torch.cuda.empty_cache()
@@ -225,11 +239,6 @@ for epoch in range(EPOCHS):
         }
         torch.save(checkpoint, BEST_PATH)
         log_write(f"  🔥 Novo melhor AUC ({best_auc:.4f}) salvo em {BEST_PATH}")
-
-    gc.collect()
-    if DEVICE.type == "cuda":
-        torch.cuda.empty_cache()
-    time.sleep(1)
 
 # ----------------------
 # Avaliação Final

@@ -1,5 +1,21 @@
 # ======================================
-# AlexNet Pré-Treinada (Fine-Tuning Moderno com AMP + Acumulação + LOG e GRÁFICOS SALVOS)
+# AlexNet Pré-Treinada (Fine-Tuning Moderno com AMP, Acumulação e Otimizações de GPU)
+# ======================================
+# Objetivo:
+#   Treinar uma AlexNet pré-treinada no ImageNet para classificação binária
+#   (ex.: imagens com fissura vs sem fissura)
+#
+# Arquitetura:
+#   AlexNet original do torchvision.models (pré-treinada, todas as camadas treináveis)
+#
+# Melhorias aplicadas:
+#   ✅ Treinamento com precisão mista (AMP – Automatic Mixed Precision)
+#   ✅ Acumulação de gradientes (permite batch efetivo maior)
+#   ✅ Pinagem de memória (pin_memory=True) e carregamento assíncrono (non_blocking=True)
+#   ✅ Normalização compatível com ImageNet
+#   ✅ Regularização intrínseca (Dropout + BatchNorm da própria AlexNet)
+#   ✅ Métricas modernas (AUC, F1, Accuracy)
+#   ✅ Log automático e salvamento de gráficos
 # ======================================
 
 #!pip install timm torchmetrics tqdm -q
@@ -8,7 +24,7 @@ import os, gc, time, datetime
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split, Subset
+from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms, models
 from torchmetrics.classification import BinaryAccuracy, BinaryAUROC, BinaryF1Score
 from tqdm import tqdm
@@ -30,15 +46,16 @@ USE_AMP = (DEVICE.type == "cuda")
 CHANNELS_LAST = (DEVICE.type == "cuda")
 
 DATASET_DIR = "/content/DATASET"
-OUT_DIR = "/content/drive/MyDrive/VERSAO_FINAL/INCEPTION_PRE-TREINO_MELHORIAS"
+OUT_DIR = "/content/drive/MyDrive/VERSAO_FINAL/2_ALEXNET_PRE-TREINO_MELHORIAS"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# Timestamp único para arquivos
+# ----------------------
+# Log e gráficos
+# ----------------------
 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-LOG_PATH = os.path.join(OUT_DIR, f"3_log_exec_{timestamp}.txt")
-GRAPH_PATH = os.path.join(OUT_DIR, f"3_grafico_treinamento_{timestamp}.png")
+LOG_PATH = os.path.join(OUT_DIR, f"2_log_exec_{timestamp}.txt")
+GRAPH_PATH = os.path.join(OUT_DIR, f"2_grafico_treinamento_{timestamp}.png")
 
-# Função auxiliar para registrar logs
 def log_write(text):
     print(text)
     with open(LOG_PATH, "a") as f:
@@ -49,7 +66,7 @@ log_write(f"Data/Hora: {timestamp}\n")
 log_write(f"Dispositivo: {DEVICE}\n")
 
 # ----------------------
-# Transformações (mantém compatibilidade com ImageNet)
+# Transformações (compatíveis com ImageNet)
 # ----------------------
 train_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -94,19 +111,15 @@ test_loader  = DataLoader(test_ds, batch_size=MICRO_BATCH_SIZE, shuffle=False,
                           num_workers=2, pin_memory=(DEVICE.type=="cuda"), persistent_workers=True)
 
 log_write(f"Treino: {len(train_ds)} | Validação: {len(val_ds)} | Teste: {len(test_ds)}")
-log_write(f"Micro-batch: {MICRO_BATCH_SIZE} | Accum steps: {ACCUM_STEPS} | Batch efetivo: {MICRO_BATCH_SIZE*ACCUM_STEPS}")
+log_write(f"Micro-batch: {MICRO_BATCH_SIZE} | Accum steps: {ACCUM_STEPS} | Batch efetivo: {MICRO_BATCH_SIZE*ACCUM_STEPS}\n")
 
 # ----------------------
-# Modelo AlexNet Pré-Treinada
+# Modelo AlexNet Pré-Treinada (todas as camadas treináveis)
 # ----------------------
 from torchvision.models import AlexNet_Weights
 model = models.alexnet(weights=AlexNet_Weights.IMAGENET1K_V1)
 model.classifier[6] = nn.Linear(model.classifier[6].in_features, 1)
 model = model.to(DEVICE)
-
-# Congela as camadas convolucionais
-for param in model.features.parameters():
-    param.requires_grad = False
 
 if CHANNELS_LAST:
     model = model.to(memory_format=torch.channels_last)
@@ -172,8 +185,8 @@ def run_epoch(model, loader, criterion, optimizer=None):
 # ----------------------
 # Loop de treinamento
 # ----------------------
-MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"3_alexnet_pretrain_melhorias_final_{timestamp}.pt")
-BEST_PATH        = os.path.join(OUT_DIR, f"3_alexnet_pretrain_melhorias_best_auc_{timestamp}.pt")
+MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"2_alexnet_pretrain_moderno_final_{timestamp}.pt")
+BEST_PATH        = os.path.join(OUT_DIR, f"2_alexnet_pretrain_moderno_best_auc_{timestamp}.pt")
 
 history = {"train_loss":[], "val_loss":[], "train_acc":[], "val_acc":[],
            "train_auc":[], "val_auc":[], "train_f1":[], "val_f1":[]}
@@ -226,7 +239,7 @@ with torch.no_grad(), torch.cuda.amp.autocast(enabled=USE_AMP):
         y_pred.extend(preds.flatten())
         y_true.extend(labels.numpy())
 
-log_write("\nRelatório de Classificação (melhor AUC):")
+log_write("\n📋 Relatório de Classificação (melhor AUC):")
 report = classification_report(y_true, y_pred, target_names=classes)
 log_write(report)
 log_write("\nMatriz de confusão:")
