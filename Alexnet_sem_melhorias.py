@@ -1,9 +1,30 @@
 # ======================================
-# AlexNet (Treinamento do Zero, sem Pré-treinamento nem Melhorias)
-# Agora com LOG + SALVAMENTO DE GRÁFICOS
+# AlexNet Pré-Treinada (Treinamento Clássico, sem Técnicas Modernas)
+# ======================================
+# Objetivo:
+#   Reproduzir o comportamento clássico da AlexNet, utilizando pesos pré-treinados no ImageNet
+#   e ajustando apenas a camada totalmente conectada (FC) final para classificação binária.
+#
+# Tipo de Experimento:
+#   Classificação binária (ex.: imagens com fissura vs sem fissura)
+#   Treinamento tradicional, sem AMP, acumulação de gradientes ou técnicas avançadas.
+#
+# Arquitetura:
+#   AlexNet padrão do torchvision.models, utilizando pesos pré-treinados (ImageNet_Weights.IMAGENET1K_V1)
+#   sem modificações estruturais nas camadas convolucionais.
+#
+# Configurações principais:
+#   - Otimizador: SGD clássico com momentum (0.9) e weight decay (5e-4)
+#   - Função de perda: BCEWithLogitsLoss (saída binária)
+#   - Batch size fixo (sem acumulação)
+#   - Acurácia como métrica principal
+#   - Logs e gráficos salvos automaticamente
+#
+# Observações:
+#   Este modelo serve como baseline para comparação com versões modernas otimizadas.
 # ======================================
 
-#!pip install timm torchmetrics tqdm -q
+#!pip install tqdm -q
 
 import os, gc, time, datetime
 import torch
@@ -11,7 +32,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split, Subset
 from torchvision import datasets, transforms, models
-from torchmetrics.classification import BinaryAccuracy, BinaryAUROC, BinaryF1Score
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix
@@ -22,49 +42,41 @@ from sklearn.metrics import classification_report, confusion_matrix
 IMG_SIZE = 227
 EPOCHS = 30
 LR = 1e-4
-SUBSET_SIZE = 40000
+BATCH_SIZE = 32
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-EFFECTIVE_BATCH_SIZE = 32
-MICRO_BATCH_SIZE = 16
-ACCUM_STEPS = max(2, EFFECTIVE_BATCH_SIZE // MICRO_BATCH_SIZE)
-USE_AMP = (DEVICE.type == "cuda")
-CHANNELS_LAST = (DEVICE.type == "cuda")
-
 DATASET_DIR = "/content/DATASET"
-OUT_DIR = "/content/drive/MyDrive/VERSAO_FINAL/ALEXNET_PRE-TREINO_ORIGINAL"
+OUT_DIR = "/content/drive/MyDrive/VERSAO_FINAL/1_ALEXNET_PRETREINO_SEM_MELHORIAS"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ----------------------
 # Cria timestamp, log e gráfico
 # ----------------------
 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-LOG_PATH = os.path.join(OUT_DIR, f"2_log_exec_{timestamp}.txt")
-GRAPH_PATH = os.path.join(OUT_DIR, f"2_grafico_treinamento_{timestamp}.png")
+LOG_PATH = os.path.join(OUT_DIR, f"1_log_exec_{timestamp}.txt")
+GRAPH_PATH = os.path.join(OUT_DIR, f"1_grafico_treinamento_{timestamp}.png")
 
 def log_write(text):
     print(text)
     with open(LOG_PATH, "a") as f:
         f.write(text + "\n")
 
-log_write("🚀 Iniciando treinamento AlexNet (não pré-treinada, sem melhorias)\n")
+log_write("🚀 Iniciando treinamento AlexNet Pré-Treinada (Treinamento Clássico, sem técnicas modernas)\n")
 
 # ----------------------
-# Transformações
+# Transformações (simples, baseadas em ImageNet)
 # ----------------------
 train_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),
     transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
 test_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
 # ----------------------
@@ -73,19 +85,13 @@ test_transform = transforms.Compose([
 base_dataset = datasets.ImageFolder(DATASET_DIR, transform=test_transform)
 classes = base_dataset.classes
 
-if SUBSET_SIZE is not None and SUBSET_SIZE < len(base_dataset):
-    indices = torch.randperm(len(base_dataset))[:SUBSET_SIZE]
-    full_dataset = Subset(base_dataset, indices)
-else:
-    full_dataset = base_dataset
-
-total_size = len(full_dataset)
+total_size = len(base_dataset)
 train_size = int(0.7 * total_size)
 val_size   = int(0.15 * total_size)
 test_size  = total_size - train_size - val_size
 
 train_ds, val_ds, test_ds = random_split(
-    full_dataset, [train_size, val_size, test_size],
+    base_dataset, [train_size, val_size, test_size],
     generator=torch.Generator().manual_seed(42)
 )
 
@@ -93,121 +99,90 @@ train_ds.dataset.transform = train_transform
 val_ds.dataset.transform   = test_transform
 test_ds.dataset.transform  = test_transform
 
-train_loader = DataLoader(train_ds, batch_size=MICRO_BATCH_SIZE, shuffle=True,
-                          num_workers=2, pin_memory=(DEVICE.type=="cuda"), persistent_workers=True)
-val_loader   = DataLoader(val_ds, batch_size=MICRO_BATCH_SIZE, shuffle=False,
-                          num_workers=2, pin_memory=(DEVICE.type=="cuda"), persistent_workers=True)
-test_loader  = DataLoader(test_ds, batch_size=MICRO_BATCH_SIZE, shuffle=False,
-                          num_workers=2, pin_memory=(DEVICE.type=="cuda"), persistent_workers=True)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+test_loader  = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
 log_write(f"Classes: {classes}")
-log_write(f"Treino: {len(train_ds)} | Validação: {len(val_ds)} | Teste: {len(test_ds)}")
-log_write(f"Micro-batch: {MICRO_BATCH_SIZE} | Accum steps: {ACCUM_STEPS} | Batch efetivo: {MICRO_BATCH_SIZE*ACCUM_STEPS}\n")
+log_write(f"Treino: {len(train_ds)} | Validação: {len(val_ds)} | Teste: {len(test_ds)}\n")
 
 # ----------------------
-# Modelo AlexNet (não pré-treinada)
+# Modelo AlexNet (Pré-treinada, sem técnicas modernas)
 # ----------------------
-model = models.alexnet(weights=None)
+from torchvision.models import AlexNet_Weights
+
+model = models.alexnet(weights=AlexNet_Weights.IMAGENET1K_V1)
 model.classifier[6] = nn.Linear(model.classifier[6].in_features, 1)
 model = model.to(DEVICE)
-if CHANNELS_LAST:
-    model = model.to(memory_format=torch.channels_last)
 
 criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr=LR)
-scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
-
-metric_acc = BinaryAccuracy().cpu()
-metric_auc = BinaryAUROC().cpu()
-metric_f1  = BinaryF1Score().cpu()
+optimizer = optim.SGD(model.parameters(), lr=LR, momentum=0.9, weight_decay=5e-4)
 
 # ----------------------
-# Função de treino/validação
+# Função de treino/validação (sem AMP, sem accumulação)
 # ----------------------
 def run_epoch(model, loader, criterion, optimizer=None):
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
-    total_loss = 0.0
-    metric_acc.reset(); metric_auc.reset(); metric_f1.reset()
+    total_loss, correct, total = 0.0, 0, 0
 
-    if is_train:
-        optimizer.zero_grad(set_to_none=True)
-
-    for step, (imgs, labels) in enumerate(tqdm(loader, desc="Treinando" if is_train else "Validando", leave=False)):
-        imgs = imgs.to(DEVICE, non_blocking=True)
+    for imgs, labels in tqdm(loader, desc="Treinando" if is_train else "Validando", leave=False):
+        imgs = imgs.to(DEVICE)
         labels = labels.float().to(DEVICE).unsqueeze(1)
 
-        with torch.cuda.amp.autocast(enabled=USE_AMP):
-            outputs = model(imgs)
-            loss = criterion(outputs, labels)
+        outputs = model(imgs)
+        loss = criterion(outputs, labels)
 
         if is_train:
-            scaler.scale(loss / ACCUM_STEPS).backward()
-            if (step + 1) % ACCUM_STEPS == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        with torch.no_grad():
-            preds = torch.sigmoid(outputs).detach().cpu()
-            lbls  = labels.detach().cpu().int()
-            metric_acc.update(preds, lbls)
-            metric_auc.update(preds, lbls)
-            metric_f1.update(preds, lbls)
+        preds = (torch.sigmoid(outputs) >= 0.5).int()
+        correct += (preds == labels.int()).sum().item()
+        total += labels.size(0)
+        total_loss += loss.item() * imgs.size(0)
 
-        total_loss += loss.detach().item() * imgs.size(0)
-        if DEVICE.type == "cuda" and step % 50 == 0:
-            torch.cuda.empty_cache()
-
-    return (
-        total_loss / len(loader.dataset),
-        float(metric_acc.compute()),
-        float(metric_auc.compute()),
-        float(metric_f1.compute())
-    )
+    avg_loss = total_loss / len(loader.dataset)
+    acc = correct / total
+    return avg_loss, acc
 
 # ----------------------
 # Treinamento
 # ----------------------
-MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"2_alexnet_pretrain_original_final_{timestamp}.pt")
-BEST_PATH        = os.path.join(OUT_DIR, f"2_alexnet_pretrain_best_original_auc_{timestamp}.pt")
+MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"1_alexnet_pretreino_final_{timestamp}.pt")
+BEST_PATH        = os.path.join(OUT_DIR, f"1_alexnet_pretreino_best_acc_{timestamp}.pt")
 
-history = {"train_loss":[], "val_loss":[], "train_acc":[], "val_acc":[],
-           "train_auc":[], "val_auc":[], "train_f1":[], "val_f1":[]}
-
-best_auc = -1.0
+history = {"train_loss":[], "val_loss":[], "train_acc":[], "val_acc":[]}
+best_acc = -1.0
 
 for epoch in range(EPOCHS):
     t0 = time.time()
-    train_loss, train_acc, train_auc, train_f1 = run_epoch(model, train_loader, criterion, optimizer)
-    val_loss, val_acc, val_auc, val_f1 = run_epoch(model, val_loader, criterion)
+    train_loss, train_acc = run_epoch(model, train_loader, criterion, optimizer)
+    val_loss, val_acc = run_epoch(model, val_loader, criterion)
 
     history["train_loss"].append(train_loss); history["val_loss"].append(val_loss)
     history["train_acc"].append(train_acc);   history["val_acc"].append(val_acc)
-    history["train_auc"].append(train_auc);   history["val_auc"].append(val_auc)
-    history["train_f1"].append(train_f1);     history["val_f1"].append(val_f1)
 
     log_write(f"\nEpoch {epoch+1}/{EPOCHS} | {time.time()-t0:.1f}s")
-    log_write(f"  Train: loss={train_loss:.4f}, acc={train_acc:.4f}, auc={train_auc:.4f}, f1={train_f1:.4f}")
-    log_write(f"  Val:   loss={val_loss:.4f}, acc={val_acc:.4f}, auc={val_auc:.4f}, f1={val_f1:.4f}")
+    log_write(f"  Train: loss={train_loss:.4f}, acc={train_acc:.4f}")
+    log_write(f"  Val:   loss={val_loss:.4f}, acc={val_acc:.4f}")
 
-    if val_auc > best_auc:
-        best_auc = val_auc
+    if val_acc > best_acc:
+        best_acc = val_acc
         checkpoint = {
             "epoch": epoch + 1,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
-            "best_auc": best_auc,
+            "best_acc": best_acc,
             "classes": classes
         }
         torch.save(checkpoint, BEST_PATH)
-        log_write(f"  🔥 Novo melhor AUC ({best_auc:.4f}) salvo em {BEST_PATH}")
+        log_write(f"  🔥 Novo melhor modelo salvo (acc={best_acc:.4f}) em {BEST_PATH}")
 
+    gc.collect()
     if DEVICE.type == "cuda":
         torch.cuda.empty_cache()
-    gc.collect()
 
 # ----------------------
 # Avaliação final
@@ -217,21 +192,21 @@ model.load_state_dict(best_ckpt["model_state"])
 model.eval()
 
 y_true, y_pred = [], []
-with torch.no_grad(), torch.cuda.amp.autocast(enabled=USE_AMP):
+with torch.no_grad():
     for imgs, labels in test_loader:
-        imgs = imgs.to(DEVICE, non_blocking=True)
+        imgs = imgs.to(DEVICE)
         outputs = model(imgs)
         preds = (torch.sigmoid(outputs).cpu().numpy() >= 0.5).astype(int)
         y_pred.extend(preds.flatten())
         y_true.extend(labels.numpy())
 
-log_write("\n📋 Relatório de Classificação (melhor AUC):")
+log_write("\n📋 Relatório de Classificação (melhor ACC):")
 log_write(classification_report(y_true, y_pred, target_names=classes))
 log_write("Matriz de confusão:")
 log_write(str(confusion_matrix(y_true, y_pred)))
 
 # ----------------------
-# Gráficos e salvamento
+# Gráficos simples
 # ----------------------
 plt.figure(figsize=(12,5))
 plt.subplot(1,2,1)
@@ -241,10 +216,9 @@ plt.title("Evolução da Loss")
 plt.legend()
 
 plt.subplot(1,2,2)
+plt.plot(history["train_acc"], label="Train Acc")
 plt.plot(history["val_acc"], label="Val Acc")
-plt.plot(history["val_auc"], label="Val AUC")
-plt.plot(history["val_f1"], label="Val F1")
-plt.title("Métricas de Validação")
+plt.title("Acurácia")
 plt.legend()
 
 plt.tight_layout()
@@ -253,5 +227,5 @@ plt.show()
 
 torch.save(model.state_dict(), MODEL_PATH_FINAL)
 log_write(f"\n✅ Modelo final salvo em {MODEL_PATH_FINAL}")
-log_write(f"🔥 Melhor checkpoint salvo em {BEST_PATH} | AUC={best_ckpt['best_auc']:.4f}")
+log_write(f"🔥 Melhor checkpoint salvo em {BEST_PATH} | ACC={best_ckpt['best_acc']:.4f}")
 log_write(f"📊 Gráfico salvo em {GRAPH_PATH}")
