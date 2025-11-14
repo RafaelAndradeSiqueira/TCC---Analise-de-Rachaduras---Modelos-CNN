@@ -1,0 +1,3 @@
+Este trabalho apresenta o desenvolvimento e a avaliação de um sistema de detecção automática de rachaduras em superfícies utilizando técnicas de Visão Computacional e Aprendizado Profundo. O projeto emprega duas arquiteturas consolidadas na literatura — AlexNet e InceptionV4 — com o objetivo de comparar seu desempenho na identificação de fissuras em imagens capturadas de estruturas civis.
+
+A proposta busca contribuir para a automação de inspeções estruturais, reduzindo custos, aumentando a precisão e oferecendo uma alternativa eficiente aos métodos tradicionais de avaliação manual. Por meio de experimentos sistemáticos, o modelo analisa padrões visuais que indicam a presença de rachaduras, permitindo maior confiabilidade e agilidade no processo de monitoramento.
