@@ -1,25 +1,8 @@
 # ======================================
 # InceptionV4 Pré-Treinada (Com Melhorias Modernas e AMP)
 # ======================================
-# Objetivo:
-#   Aproveitar os pesos pré-treinados da InceptionV4 (ImageNet)
-#   aplicando técnicas modernas de eficiência e estabilidade de treinamento.
-#
-# Melhorias aplicadas:
-#   ✅ AMP (Automatic Mixed Precision) → menor uso de VRAM e maior velocidade.
-#   ✅ Acumulação de gradientes → simula batches maiores com menos memória.
-#   ✅ Pinagem de memória + non_blocking → transferência CPU↔GPU otimizada.
-#   ✅ Channels_last → uso mais eficiente da arquitetura RTX (Tensor Cores).
-#   ✅ AdamW + CosineAnnealingLR → otimização estável e convergência suave.
-#   ✅ Dropout + BatchNorm → já integrados na arquitetura InceptionV4.
-#
-# Sem:
-#   🚫 Congelamento de camadas
-#   🚫 Técnicas que prejudiquem generalização (augmentations agressivos)
-#
-# ======================================
 
-#!pip install timm tqdm torchmetrics -q
+!pip install timm tqdm torchmetrics -q
 
 import os, gc, time, datetime
 import torch
@@ -39,26 +22,25 @@ from sklearn.metrics import classification_report, confusion_matrix
 IMG_SIZE = 299
 EPOCHS = 30
 LR = 1e-4
-SUBSET_SIZE = 40000  # opcional (usar subset do dataset)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 torch.backends.cudnn.benchmark = True
 
 EFFECTIVE_BATCH_SIZE = 32
-MICRO_BATCH_SIZE = 16
+MICRO_BATCH_SIZE = 32
 ACCUM_STEPS = max(2, EFFECTIVE_BATCH_SIZE // MICRO_BATCH_SIZE)
 USE_AMP = (DEVICE.type == "cuda")
 CHANNELS_LAST = (DEVICE.type == "cuda")
 
 DATASET_DIR = "/content/DATASET"
-OUT_DIR = "/content/drive/MyDrive/VERSAO_FINAL/4_INCEPTIONV4_MODERNA"
+OUT_DIR = "/content/2-VERSAO/2.2-INCEPTIONV4/2.2.1-FINI-TUNING-COMPLETO_MELHORIAS/NEW_2.2.1_INCEPTION_MELHORIAS"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-LOG_PATH = os.path.join(OUT_DIR, f"4_log_exec_{timestamp}.txt")
-GRAPH_PATH = os.path.join(OUT_DIR, f"4_grafico_treinamento_{timestamp}.png")
-MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"4_inceptionv4_final_{timestamp}.pt")
-BEST_PATH = os.path.join(OUT_DIR, f"4_inceptionv4_best_auc_{timestamp}.pt")
+LOG_PATH = os.path.join(OUT_DIR, f"new_2.2.1_melhorias_log_exec_{timestamp}.txt")
+GRAPH_PATH = os.path.join(OUT_DIR, f"new_2.2.1_melhorias_grafico_treinamento_{timestamp}.png")
+MODEL_PATH_FINAL = os.path.join(OUT_DIR, f"new_2.2.1_melhorias_inceptionv4_final_{timestamp}.pt")
+BEST_PATH = os.path.join(OUT_DIR, f"new_2.2.1_melhorias_inceptionv4_best_acc_{timestamp}.pt")
 
 def log_write(text):
     print(text)
@@ -101,11 +83,7 @@ test_transform = transforms.Compose([
 base_dataset = datasets.ImageFolder(DATASET_DIR, transform=test_transform)
 classes = base_dataset.classes
 
-if SUBSET_SIZE and SUBSET_SIZE < len(base_dataset):
-    indices = torch.randperm(len(base_dataset))[:SUBSET_SIZE]
-    full_dataset = Subset(base_dataset, indices)
-else:
-    full_dataset = base_dataset
+full_dataset = base_dataset
 
 train_size = int(0.7 * len(full_dataset))
 val_size   = int(0.15 * len(full_dataset))
@@ -140,9 +118,6 @@ model = model.to(DEVICE)
 
 if CHANNELS_LAST:
     model = model.to(memory_format=torch.channels_last)
-
-for param in model.parameters():
-    param.requires_grad = True  # sem congelamento
 
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
@@ -190,7 +165,6 @@ def run_epoch(model, loader, criterion, optimizer=None):
             metric_f1.update(preds, lbls)
 
         total_loss += loss.detach().item() * imgs.size(0)
-
         del imgs, labels, outputs, loss
         gc.collect()
         if DEVICE.type == "cuda":
@@ -207,12 +181,12 @@ def run_epoch(model, loader, criterion, optimizer=None):
     )
 
 # ----------------------
-# Loop de Treinamento
+# Loop de Treinamento 
 # ----------------------
 history = {"train_loss":[], "val_loss":[], "train_acc":[], "val_acc":[],
            "train_auc":[], "val_auc":[], "train_f1":[], "val_f1":[]}
 
-best_auc = -1.0
+best_acc = -1.0
 
 for epoch in range(EPOCHS):
     t0 = time.time()
@@ -228,17 +202,18 @@ for epoch in range(EPOCHS):
     log_write(f"  Train: loss={train_loss:.4f}, acc={train_acc:.4f}, auc={train_auc:.4f}, f1={train_f1:.4f}")
     log_write(f"  Val:   loss={val_loss:.4f}, acc={val_acc:.4f}, auc={val_auc:.4f}, f1={val_f1:.4f}")
 
-    if val_auc > best_auc:
-        best_auc = val_auc
+
+    if val_acc > best_acc:
+        best_acc = val_acc
         checkpoint = {
             "epoch": epoch + 1,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
-            "best_auc": best_auc,
+            "best_acc": best_acc,
             "classes": classes
         }
         torch.save(checkpoint, BEST_PATH)
-        log_write(f"  🔥 Novo melhor AUC ({best_auc:.4f}) salvo em {BEST_PATH}")
+        log_write(f"   Novo melhor modelo salvo com ACC={best_acc:.4f} em {BEST_PATH}")
 
 # ----------------------
 # Avaliação Final
@@ -256,7 +231,7 @@ with torch.no_grad(), torch.cuda.amp.autocast(enabled=USE_AMP):
         y_pred.extend(preds.flatten())
         y_true.extend(labels.numpy())
 
-log_write("\n📋 Relatório de Classificação (melhor AUC):")
+log_write("\n Relatório de Classificação (melhor ACC):")
 log_write(classification_report(y_true, y_pred, target_names=classes))
 log_write("Matriz de confusão:")
 log_write(str(confusion_matrix(y_true, y_pred)))
@@ -283,6 +258,6 @@ plt.savefig(GRAPH_PATH, dpi=300)
 plt.show()
 
 torch.save(model.state_dict(), MODEL_PATH_FINAL)
-log_write(f"\n✅ Modelo final salvo em {MODEL_PATH_FINAL}")
-log_write(f"🔥 Melhor checkpoint salvo em {BEST_PATH} | AUC={best_ckpt['best_auc']:.4f}")
-log_write(f"📊 Gráfico salvo em {GRAPH_PATH}")
+log_write(f"\n Modelo final salvo em {MODEL_PATH_FINAL}")
+log_write(f" Melhor checkpoint salvo em {BEST_PATH} | ACC={best_ckpt['best_acc']:.4f}")
+log_write(f" Gráfico salvo em {GRAPH_PATH}")
